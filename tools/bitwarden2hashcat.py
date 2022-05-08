@@ -54,16 +54,31 @@ def process_sqlite(path, mode):
 
     # uses undocumented nonstandard data format
     # probably can break in the future
-    dataValue = snappy.decompress(fetched[0][4])
+    # iterate all retrieved rows and try extracting by force
+    out = []
+    for x in fetched:
+        try:
+            dataValue = snappy.decompress(x[4])
 
-    if (mode == Mode.PASS_HASH):
-        key_hash = dataValue.split(b"keyHash")[1][9:53].decode()
-        email = dataValue.split(b"email")[1][11:].split(b'\x00')[0].decode()
-        iterations = int.from_bytes(dataValue.split(b"kdfIterations")[1][3:7], byteorder="little")
+            if (mode == Mode.PASS_HASH):
+                key_hash = dataValue.split(b"keyHash")[1][9:53].decode()
+                email = dataValue.split(b"email")[1][11:].split(b'\x00')[0].decode()
+                iterations = int.from_bytes(dataValue.split(b"kdfIterations")[1][3:7], byteorder="little")
 
-        return [(email, key_hash, iterations)]
-    else:
-        raise NotImplementedError()
+                out.append((email, key_hash, iterations))
+            else:
+                pinProtectedKey = dataValue.split(b"pinProtected")[1].split(b"encrypted")[1]\
+                    .split(b"\xFF\xFF")[1].split(b"\x00\x00")[0].decode()
+                email = dataValue.split(b"email")[1][11:].split(b'\x00')[0].decode()
+                iterations = int.from_bytes(dataValue.split(b"kdfIterations")[1][3:7], byteorder="little")
+                (iv, data, mac) = pinProtectedKey[3:].split('|')
+                
+                print(iv)
+                out.append((iterations, email, iv, data, mac))
+        except(Exception):
+            pass
+
+    return out
 
 
 def process_leveldb(path, mode):
@@ -121,8 +136,16 @@ def process_json(data, mode):
             iterations = data["kdfIterations"]
 
             return [(email, hash, iterations)]
+        elif (mode == Mode.PIN):
+            email = data["userEmail"]
+            iterations = data["kdfIterations"]
+            pinProtectedKey = data["pinProtectedKey"]
+            (iv, data, mac) = pinProtectedKey[2:].split('|')
+            print(pinProtectedKey)
+            return [(iterations, email, iv, data, mac)] 
+            
         else:
-            raise NotImplementedError()
+            raise NotImplementedError("This mode is not supported.")
 
 
 def extract_json_profile(data, mode):
@@ -136,7 +159,6 @@ def extract_json_profile(data, mode):
         settings = data["settings"]
         email = profile["email"]
         iterations = profile["kdfIterations"]
-        hash = profile["keyHash"]
         pinProtectedKey = settings["pinProtected"]["encrypted"]
         (iv, data, mac) = pinProtectedKey[2:].split('|')
         return iterations, email, iv, data, mac 
@@ -158,12 +180,12 @@ def process_file(filename, mode, legacy = False):
                 data = f.read()
                 data = process_json(data, mode)
         else:
-            print("Unknown storage. Don't know how to extract data.", file=sys.stderr)
+            print("[error] Unknown storage. Don't know how to extract data.", file=sys.stderr)
             sys.exit(-1)
 
     except (ValueError, KeyError):
         traceback.print_exc()
-        print("Missing values, user is probably logged out.", file=sys.stderr)
+        print("[error] Missing values, user is probably logged out.", file=sys.stderr)
         return
     except:
         traceback.print_exc()
