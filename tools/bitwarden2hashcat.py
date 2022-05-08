@@ -1,4 +1,4 @@
-"""Utility to extract Bitwarden hash for hashcat from Google Chrome / Firefox / Desktop local data"""
+"""Utility to extract Bitwarden hash for hashcat from Google Chrome / Firefox / Desktop / Android local data"""
 
 #
 # Based on bitwarden2john.py https://github.com/willstruggle/john/blob/master/bitwarden2john.py
@@ -11,6 +11,7 @@
 
 import os
 import argparse
+from sqlite3 import NotSupportedError
 import sys
 import base64
 import traceback
@@ -47,6 +48,7 @@ class Mode(Enum):
 def litedb_get_value(data, name):
     value = data.split(name + b'\x00\x02Value\x00')[1]
     len = int.from_bytes(value[0:3], byteorder="little")
+    # lenght includes null byte -> len - 1
     return value[4:(len + 3)].decode()
 
 
@@ -168,8 +170,16 @@ def process_leveldb(path, mode):
                 .decode("ascii").strip('"')
             iterations = int(db.Get(b'kdfIterations').decode("ascii"))
             return [(email, key_hash, iterations)]
+        elif(mode == Mode.PIN):
+            email = db.Get(b'userEmail')\
+                .decode()\
+                .strip('"')
+            iterations = int(db.Get(b'kdfIterations').decode())
+            pin_protected_key = db.Get(b'pinProtectedKey').decode().strip('"')
+            (iv, enc_data, mac) = pin_protected_key[2:].split('|')
+            return [(iterations, email, iv, enc_data, mac)]
         else:
-            raise NotImplementedError()
+            raise NotSupportedError()
 
 
 def process_json(data, mode):
@@ -177,8 +187,8 @@ def process_json(data, mode):
 
     try:
         out = []
-        accIds = data["authenticatedAccounts"]
-        for id in accIds:
+        acc_ids = data["authenticatedAccounts"]
+        for id in acc_ids:
             try:
                 auth_acc_data = data[id.strip('"')]
                 out.append(extract_json_profile(auth_acc_data, mode))
@@ -196,9 +206,9 @@ def process_json(data, mode):
         elif (mode == Mode.PIN):
             email = data["userEmail"]
             iterations = data["kdfIterations"]
-            pinProtectedKey = data["pinProtectedKey"]
-            (iv, data, mac) = pinProtectedKey[2:].split('|')
-            return [(iterations, email, iv, data, mac)] 
+            pin_protected_key = data["pinProtectedKey"]
+            (iv, enc_data, mac) = pin_protected_key[2:].split('|')
+            return [(iterations, email, iv, enc_data, mac)] 
             
         else:
             raise NotImplementedError("This mode is not supported.")
@@ -216,8 +226,8 @@ def extract_json_profile(data, mode):
         email = profile["email"]
         iterations = profile["kdfIterations"]
         pin_protected_key = settings["pinProtected"]["encrypted"]
-        (iv, data, mac) = pin_protected_key[2:].split('|')
-        return iterations, email, iv, data, mac 
+        (iv, enc_data, mac) = pin_protected_key[2:].split('|')
+        return iterations, email, iv, enc_data, mac 
     else:
         raise NotImplementedError()
 
