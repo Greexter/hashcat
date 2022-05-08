@@ -9,8 +9,10 @@
 # License: MIT
 #
 
+from fileinput import filename
 import os
 import argparse
+from re import I
 import sys
 import base64
 import traceback
@@ -33,6 +35,32 @@ class Mode(Enum):
 
     def __str__(self):
         return self.value
+
+
+def litedb_get_value(data, name):
+    value = data.split(name + b'\x00\x02Value\x00')[1]
+    len = int.from_bytes(value[0:3], byteorder="little")
+    return value[4:(len + 3)].decode()
+
+
+def process_litedb(path, mode):
+    # Due to no support for LiteDB in python, values are extracted manually
+    with open(path, "rb") as litedb:
+        data = litedb.read()
+        
+        if (mode == Mode.PASS_HASH):
+            key_hash = litedb_get_value(data, b'keyHash').strip("\"")
+            email = litedb_get_value(data, b'userEmail').strip("\"")
+            iterations = int(litedb_get_value(data, b'kdfIterations'))
+            return [(email, key_hash, iterations)]
+        elif (mode == Mode.PIN):
+            email = litedb_get_value(data, b'userEmail').strip("\"")
+            iterations = int(litedb_get_value(data, b'kdfIterations'))
+            pin_protected_key = litedb_get_value(data, b'pinProtectedKey').strip("\"")
+            (iv, enc_data, mac) = pin_protected_key[2:].split('|')
+            return [(iterations, email, iv, enc_data, mac)]
+        else:
+            raise NotImplementedError()
 
 
 def process_sqlite(path, mode):
@@ -157,6 +185,9 @@ def process_file(filename, mode, legacy = False):
             with open(filename, "rb") as f:
                 data = f.read()
                 data = process_json(data, mode)
+        elif filename.endswith(".db"):
+            # litedb - android
+            data = process_litedb(filename, mode)
         else:
             print("Unknown storage. Don't know how to extract data.", file=sys.stderr)
             sys.exit(-1)
