@@ -9,10 +9,8 @@
 # License: MIT
 #
 
-from fileinput import filename
 import os
 import argparse
-from re import I
 import sys
 import base64
 import traceback
@@ -27,6 +25,15 @@ except ImportError:
     except ImportError:
         print("Please install json module which is currently not installed.\n", file=sys.stderr)
         sys.exit(-1)
+
+
+# Using precoded key values defined here for firefox DB
+encoded_key_dict = {
+     "kdfIterations": "0legJufsbujpot",
+     "userEmail": "0vtfsFnbjm",
+     "pinProtectedKey": "0qjoQspufdufeLfz",
+     "keyHash": "0lfzIbti"
+}
 
 
 class Mode(Enum):
@@ -80,28 +87,50 @@ def process_sqlite(path, mode):
     data = cur.execute('SELECT * FROM object_data')
     fetched = data.fetchall()
 
-    # uses undocumented nonstandard data format
-    # probably can break in the future
-    # iterate all retrieved rows and try extracting by force
+    # Uses undocumented nonstandard data format
+    # Probably can break in the future
+
+    parsed = {}
+    for row in fetched:
+        name_str = row[1].decode()
+        if(name_str == encoded_key_dict["kdfIterations"]):
+            parsed["kdfIterations"] = int.from_bytes(row[4].split(b'\xFF')[1][0:3], "little")
+        elif(name_str == encoded_key_dict["keyHash"] and mode == Mode.PASS_HASH):
+            parsed["keyHash"] = row[4].split(b'\xFF\xFF')[1].split(b'\x00')[0].strip(b'\x00').decode()
+        elif(name_str == encoded_key_dict["userEmail"]):
+            parsed["userEmail"] = row[4].split(b'\xFF\xFF')[1].decode()
+        elif(name_str == encoded_key_dict["pinProtectedKey"] and mode == Mode.PIN):
+            pin_protected_key = row[4].split(b"\xFF\xFF")[1].strip(b"\x00").decode()
+            (iv, enc_data, mac) = pin_protected_key[3:].split('|')
+            parsed["iv"] = iv
+            parsed["enc_data"] = enc_data
+            parsed["mac"] = mac
+
+    if(len(parsed.keys()) == 3 and mode == Mode.PASS_HASH):
+        return [(parsed["userEmail"], parsed["keyHash"], parsed["kdfIterations"])]
+    elif(len(parsed.keys()) == 5 and mode == Mode.PIN):
+        return [(parsed["kdfIterations"], parsed["userEmail"], parsed["iv"], parsed["enc_data"], parsed["mac"])]
+
+    # Failed to parse all, try new format
+    # Iterate all retrieved rows and try extracting by force
     out = []
     for x in fetched:
         try:
-            dataValue = snappy.decompress(x[4])
+            decompressed = snappy.decompress(x[4])
 
             if (mode == Mode.PASS_HASH):
-                key_hash = dataValue.split(b"keyHash")[1][9:53].decode()
-                email = dataValue.split(b"email")[1][11:].split(b'\x00')[0].decode()
-                iterations = int.from_bytes(dataValue.split(b"kdfIterations")[1][3:7], byteorder="little")
+                key_hash = decompressed.split(b"keyHash")[1][9:53].decode()
+                email = decompressed.split(b"email")[1][11:].split(b'\x00')[0].decode()
+                iterations = int.from_bytes(decompressed.split(b"kdfIterations")[1][3:7], byteorder="little")
 
                 out.append((email, key_hash, iterations))
             else:
-                pinProtectedKey = dataValue.split(b"pinProtected")[1].split(b"encrypted")[1]\
+                pin_protected_key = decompressed.split(b"pinProtected")[1].split(b"encrypted")[1]\
                     .split(b"\xFF\xFF")[1].split(b"\x00\x00")[0].decode()
-                email = dataValue.split(b"email")[1][11:].split(b'\x00')[0].decode()
-                iterations = int.from_bytes(dataValue.split(b"kdfIterations")[1][3:7], byteorder="little")
-                (iv, data, mac) = pinProtectedKey[3:].split('|')
-                
-                print(iv)
+                email = decompressed.split(b"email")[1][11:].split(b'\x00')[0].decode()
+                iterations = int.from_bytes(decompressed.split(b"kdfIterations")[1][3:7], byteorder="little")
+                (iv, data, mac) = pin_protected_key[3:].split('|')
+
                 out.append((iterations, email, iv, data, mac))
         except(Exception):
             pass
@@ -120,11 +149,11 @@ def process_leveldb(path, mode):
 
     try:
         out = []
-        accIds = db.Get(b'authenticatedAccounts')
-        accIds = json.loads(accIds)
-        for id in accIds:
-            authAccData = db.Get(id.strip('"').encode())
-            out.append(extract_json_profile(json.loads(authAccData)))
+        acc_ids = db.Get(b'authenticatedAccounts')
+        acc_ids = json.loads(acc_ids)
+        for id in acc_ids:
+            auth_acc_data = db.Get(id.strip('"').encode())
+            out.append(extract_json_profile(json.loads(auth_acc_data)))
         return out
 
     except(KeyError):
@@ -151,8 +180,8 @@ def process_json(data, mode):
         accIds = data["authenticatedAccounts"]
         for id in accIds:
             try:
-                authAccData = data[id.strip('"')]
-                out.append(extract_json_profile(authAccData, mode))
+                auth_acc_data = data[id.strip('"')]
+                out.append(extract_json_profile(auth_acc_data, mode))
             except(KeyError):
                 print("[error] Account id %s is missing required value, extraction is not possible for this mode. You may want to try different mode." % id, file=sys.stderr)
         return out
@@ -169,7 +198,6 @@ def process_json(data, mode):
             iterations = data["kdfIterations"]
             pinProtectedKey = data["pinProtectedKey"]
             (iv, data, mac) = pinProtectedKey[2:].split('|')
-            print(pinProtectedKey)
             return [(iterations, email, iv, data, mac)] 
             
         else:
@@ -187,8 +215,8 @@ def extract_json_profile(data, mode):
         settings = data["settings"]
         email = profile["email"]
         iterations = profile["kdfIterations"]
-        pinProtectedKey = settings["pinProtected"]["encrypted"]
-        (iv, data, mac) = pinProtectedKey[2:].split('|')
+        pin_protected_key = settings["pinProtected"]["encrypted"]
+        (iv, data, mac) = pin_protected_key[2:].split('|')
         return iterations, email, iv, data, mac 
     else:
         raise NotImplementedError()
@@ -213,13 +241,16 @@ def process_file(filename, mode, legacy = False):
         else:
             print("[error] Unknown storage. Don't know how to extract data.", file=sys.stderr)
             sys.exit(-1)
-
     except (ValueError, KeyError):
         traceback.print_exc()
         print("[error] Missing values, user is probably logged out.", file=sys.stderr)
         return
     except:
         traceback.print_exc()
+        return
+    
+    if(len(data) == 0):
+        print("No values could be found. User is probably logged out.")
         return
 
     if (mode == Mode.PASS_HASH):
@@ -233,7 +264,7 @@ def process_file(filename, mode, legacy = False):
     elif (mode == Mode.PIN):
             for entry in data:
                 if len(entry) != 5:
-                    print("[error] %s could not be parsed properly!\nUser is probably logged out." % filename, file=sys.stderr)
+                    print("[error] %s could not be parsed properly!\nUser is probably logged out or PIN lock is not set." % filename, file=sys.stderr)
                     continue
                 print(f"$bitwardenpin$1*{entry[0]}*{base64.b64encode(entry[1].encode()).decode()}*{entry[2]}*{entry[3]}*{entry[4]}")
     else:
